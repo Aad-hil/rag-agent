@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from app.generation.context import ContextSource, build_context
 from app.llm.client import generate
-from app.retrieval.search import search
+from app.retrieval.search import SearchResult, search
 
 
 @dataclass(frozen=True)
@@ -136,26 +136,30 @@ def _render_citations(
     )
 
 
-def answer_question(
+def abstain_answer() -> Answer:
+    """Return the standard no-support response without citations."""
+
+    return Answer(
+        text=(
+            "The provided documents do not contain enough "
+            "information to answer this question."
+        ),
+        citations=(),
+    )
+
+
+def answer_from_results(
     question: str,
-    limit: int = 5,
+    results: list[SearchResult],
 ) -> Answer:
     """
-    Retrieve context and generate a citation-aware answer.
+    Generate a citation-aware answer from retrieved results.
     """
-
-    results = search(question, limit=limit)
 
     built_context = build_context(results)
 
     if not built_context.text:
-        return Answer(
-            text=(
-                "The provided documents do not contain enough "
-                "information to answer this question."
-            ),
-            citations=(),
-        )
+        return abstain_answer()
 
     prompt = f"""
 Context:
@@ -195,5 +199,19 @@ Question:
     return Answer(
         text=rendered_answer,
         citations=citations,
+    )
+
+
+def answer_question(
+    question: str,
+    limit: int = 5,
+) -> Answer:
+    """
+    Retrieve context and generate a citation-aware answer.
+    """
+
+    return answer_from_results(
+        question,
+        search(question, limit=limit),
     )
 
