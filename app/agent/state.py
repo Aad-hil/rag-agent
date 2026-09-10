@@ -11,3 +11,4 @@ class AgentState(TypedDict):
     results: list[SearchResult]
     is_relevant: bool
     answer: Answer
+    is_answer_valid: bool

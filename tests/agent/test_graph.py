@@ -1,7 +1,7 @@
 import app.agent.graph as agent_graph
 
 from app.agent.graph import graph
-from app.generation.answer import Answer
+from app.generation.answer import Answer, AnswerCitation
 from app.retrieval.search import SearchResult
 
 
@@ -252,3 +252,90 @@ def test_relevant_retrieval_generates_answer_without_rewrite(monkeypatch):
     assert generation_called
     assert result["is_relevant"] is True
     assert result["retry_count"] == 0
+
+
+def test_valid_generated_answer_reaches_end(monkeypatch):
+    results = [
+        SearchResult(
+            text="Relevant content",
+            score=0.60,
+            source="document.pdf",
+            page_number=20,
+            chunk_index=10,
+        ),
+    ]
+
+    valid_answer = Answer(
+        text="Generated answer",
+        citations=(
+            AnswerCitation(
+                citation_id=1,
+                source="document.pdf",
+                page_number=20,
+                chunk_index=10,
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(
+        agent_graph,
+        "search",
+        lambda _question: results,
+    )
+    monkeypatch.setattr(
+        agent_graph,
+        "answer_from_results",
+        lambda _question, _results: valid_answer,
+    )
+
+    result = graph.invoke(
+        {
+            "question": "A relevant question",
+        }
+    )
+
+    assert result["is_answer_valid"] is True
+    assert result["answer"].citations
+    assert result["answer"].text == "Generated answer"
+
+
+def test_invalid_generated_answer_routes_to_abstain(monkeypatch):
+    results = [
+        SearchResult(
+            text="Relevant content",
+            score=0.60,
+            source="document.pdf",
+            page_number=20,
+            chunk_index=10,
+        ),
+    ]
+
+    invalid_answer = Answer(
+        text="Generated answer",
+        citations=(),
+    )
+
+    monkeypatch.setattr(
+        agent_graph,
+        "search",
+        lambda _question: results,
+    )
+    monkeypatch.setattr(
+        agent_graph,
+        "answer_from_results",
+        lambda _question, _results: invalid_answer,
+    )
+
+    result = graph.invoke(
+        {
+            "question": "A relevant question",
+        }
+    )
+
+    assert result["is_answer_valid"] is False
+    assert result["answer"].citations == ()
+    assert (
+        result["answer"].text
+        == "The provided documents do not contain enough "
+        "information to answer this question."
+    )

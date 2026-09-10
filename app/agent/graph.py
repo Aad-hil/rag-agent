@@ -6,6 +6,7 @@ from app.agent.relevance import is_relevant
 from app.agent.retry import MAX_RETRIES
 from app.agent.rewrite import rewrite_query as rewrite_query_text
 from app.agent.state import AgentState
+from app.agent.validation import is_valid_answer
 from app.generation.answer import Answer, abstain_answer, answer_from_results
 from app.retrieval.search import SearchResult, search
 
@@ -55,6 +56,21 @@ def generate_answer(state: AgentState) -> dict[str, Answer]:
     }
 
 
+def validate_answer(state: AgentState) -> dict[str, bool]:
+    return {
+        "is_answer_valid": is_valid_answer(state["answer"]),
+    }
+
+
+def route_after_answer_validation(
+    state: AgentState,
+) -> Literal["end", "abstain"]:
+    if state["is_answer_valid"]:
+        return "end"
+
+    return "abstain"
+
+
 def abstain(_: AgentState) -> dict[str, Answer]:
     return {
         "answer": abstain_answer(),
@@ -67,6 +83,7 @@ builder.add_node("retrieve", retrieve)
 builder.add_node("check_relevance", check_relevance)
 builder.add_node("rewrite_query", rewrite_query)
 builder.add_node("generate_answer", generate_answer)
+builder.add_node("validate_answer", validate_answer)
 builder.add_node("abstain", abstain)
 
 builder.add_edge(START, "retrieve")
@@ -83,7 +100,17 @@ builder.add_conditional_edges(
 )
 
 builder.add_edge("rewrite_query", "retrieve")
-builder.add_edge("generate_answer", END)
+builder.add_edge("generate_answer", "validate_answer")
+
+builder.add_conditional_edges(
+    "validate_answer",
+    route_after_answer_validation,
+    {
+        "end": END,
+        "abstain": "abstain",
+    },
+)
+
 builder.add_edge("abstain", END)
 
 graph = builder.compile()
