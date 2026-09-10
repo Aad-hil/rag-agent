@@ -1,0 +1,1 @@
+MAX_RETRIES: int = 1

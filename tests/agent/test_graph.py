@@ -152,6 +152,48 @@ def test_irrelevant_question_rewrites_and_retrieves_again(monkeypatch):
     assert result["is_relevant"] is True
 
 
+def test_retry_limit_prevents_additional_retry(monkeypatch):
+    results = [
+        SearchResult(
+            text="Unrelated content",
+            score=0.25,
+            source="document.pdf",
+            page_number=1,
+            chunk_index=0,
+        ),
+    ]
+
+    search_call_count = 0
+
+    def fake_search(_query):
+        nonlocal search_call_count
+
+        search_call_count += 1
+        return results
+
+    monkeypatch.setattr(
+        agent_graph,
+        "search",
+        fake_search,
+    )
+    monkeypatch.setattr(
+        agent_graph,
+        "rewrite_query_text",
+        lambda _question: "rewritten search query",
+    )
+
+    result = graph.invoke(
+        {
+            "question": "An unrelated question",
+        }
+    )
+
+    assert search_call_count == 2
+    assert result["retry_count"] == 1
+    assert result["is_relevant"] is False
+    assert result["answer"].citations == ()
+
+
 def test_relevant_retrieval_generates_answer_without_rewrite(monkeypatch):
     results = [
         SearchResult(

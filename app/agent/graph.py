@@ -3,6 +3,7 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.relevance import is_relevant
+from app.agent.retry import MAX_RETRIES
 from app.agent.rewrite import rewrite_query as rewrite_query_text
 from app.agent.state import AgentState
 from app.generation.answer import Answer, abstain_answer, answer_from_results
@@ -30,7 +31,7 @@ def route_after_relevance(
     if state["is_relevant"]:
         return "generate_answer"
 
-    if state.get("retry_count", 0) >= 1:
+    if state.get("retry_count", 0) >= MAX_RETRIES:
         return "abstain"
 
     return "rewrite_query"
