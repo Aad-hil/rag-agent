@@ -1,15 +1,20 @@
+from unittest.mock import patch
+
 from app.evaluation.generation import (
     ABSTENTION_TEXT,
     citation_pages,
     cited_relevant_pages,
     evaluate_generation,
+    generate_and_evaluate,
     has_answer,
     has_citations,
     is_abstention,
+    retrieved_page_numbers,
     unsupported_citation_pages,
     validate_citations,
 )
 from app.generation.answer import Answer, AnswerCitation
+from app.retrieval.search import SearchResult
 
 
 def make_citation(
@@ -31,6 +36,19 @@ def make_answer(
     return Answer(
         text=text,
         citations=citations,
+    )
+
+
+def make_search_result(
+    page_number: int,
+    chunk_index: int = 0,
+) -> SearchResult:
+    return SearchResult(
+        text=f"Content from page {page_number}.",
+        score=0.9,
+        source="test.pdf",
+        page_number=page_number,
+        chunk_index=chunk_index,
     )
 
 
@@ -92,6 +110,19 @@ def test_citation_pages_returns_unique_pages_in_order():
     )
 
     assert citation_pages(answer) == (
+        20,
+        21,
+    )
+
+
+def test_retrieved_page_numbers_returns_unique_pages_in_order():
+    results = [
+        make_search_result(20),
+        make_search_result(21),
+        make_search_result(20, chunk_index=1),
+    ]
+
+    assert retrieved_page_numbers(results) == (
         20,
         21,
     )
@@ -172,7 +203,7 @@ def test_evaluate_generation_returns_expected_result():
         answer=answer,
         relevant_pages={21},
         valid_citation_ids={1, 2, 3},
-        retrieved_pages={21, 50},
+        retrieved_pages=(21, 50),
     )
 
     assert result.has_answer is True
@@ -181,6 +212,11 @@ def test_evaluate_generation_returns_expected_result():
     assert result.citations_valid is True
 
     assert result.citation_pages == (
+        21,
+        50,
+    )
+
+    assert result.retrieved_pages == (
         21,
         50,
     )
@@ -205,7 +241,7 @@ def test_evaluate_generation_detects_invalid_and_unsupported_citations():
         answer=answer,
         relevant_pages={20},
         valid_citation_ids={1, 2, 3},
-        retrieved_pages={20, 50},
+        retrieved_pages=(20, 50),
     )
 
     assert result.has_answer is True
@@ -215,6 +251,11 @@ def test_evaluate_generation_detects_invalid_and_unsupported_citations():
     assert result.citation_pages == (
         20,
         99,
+    )
+
+    assert result.retrieved_pages == (
+        20,
+        50,
     )
 
     assert result.cited_relevant_pages == (
@@ -235,7 +276,7 @@ def test_evaluate_generation_handles_abstention():
         answer=answer,
         relevant_pages={20},
         valid_citation_ids={1, 2, 3},
-        retrieved_pages={20, 50},
+        retrieved_pages=(20, 50),
     )
 
     assert result.has_answer is True
@@ -243,5 +284,107 @@ def test_evaluate_generation_handles_abstention():
     assert result.has_citations is False
     assert result.citations_valid is True
     assert result.citation_pages == ()
+    assert result.retrieved_pages == (
+        20,
+        50,
+    )
+    assert result.cited_relevant_pages == ()
+    assert result.unsupported_citation_pages == ()
+
+
+def test_generate_and_evaluate_uses_real_pipeline():
+    results = [
+        make_search_result(20),
+        make_search_result(21),
+        make_search_result(50),
+    ]
+
+    answer = make_answer(
+        text="The orchestrator processes the request.",
+        citations=(
+            make_citation(1, 20),
+            make_citation(2, 21),
+        ),
+    )
+
+    with patch(
+        "app.evaluation.generation.search",
+        return_value=results,
+    ) as mocked_search, patch(
+        "app.evaluation.generation.answer_from_results",
+        return_value=answer,
+    ) as mocked_answer_from_results:
+        result = generate_and_evaluate(
+            question="How does the orchestrator process requests?",
+            relevant_pages={20, 21},
+            limit=5,
+        )
+
+    mocked_search.assert_called_once_with(
+        "How does the orchestrator process requests?",
+        limit=5,
+    )
+
+    mocked_answer_from_results.assert_called_once_with(
+        question="How does the orchestrator process requests?",
+        results=results,
+    )
+
+    assert result.has_answer is True
+    assert result.is_abstention is False
+    assert result.has_citations is True
+    assert result.citations_valid is True
+
+    assert result.citation_pages == (
+        20,
+        21,
+    )
+
+    assert result.retrieved_pages == (
+        20,
+        21,
+        50,
+    )
+
+    assert result.cited_relevant_pages == (
+        20,
+        21,
+    )
+
+    assert result.unsupported_citation_pages == ()
+
+
+def test_generate_and_evaluate_preserves_retrieved_pages_when_no_citations():
+    results = [
+        make_search_result(157),
+        make_search_result(169),
+        make_search_result(183),
+    ]
+
+    answer = make_answer(
+        text="Conversation history is maintained by the solution."
+    )
+
+    with patch(
+        "app.evaluation.generation.search",
+        return_value=results,
+    ), patch(
+        "app.evaluation.generation.answer_from_results",
+        return_value=answer,
+    ):
+        result = generate_and_evaluate(
+            question="How is conversation history maintained?",
+            relevant_pages={157, 169},
+            limit=5,
+        )
+
+    assert result.has_answer is True
+    assert result.has_citations is False
+    assert result.citation_pages == ()
+    assert result.retrieved_pages == (
+        157,
+        169,
+        183,
+    )
     assert result.cited_relevant_pages == ()
     assert result.unsupported_citation_pages == ()
