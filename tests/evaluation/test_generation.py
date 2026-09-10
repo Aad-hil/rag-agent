@@ -174,6 +174,20 @@ def test_cited_relevant_pages_returns_only_relevant_pages():
     )
 
 
+def test_cited_relevant_pages_returns_empty_when_no_relevant_page_is_cited():
+    answer = make_answer(
+        citations=(
+            make_citation(1, 183),
+            make_citation(2, 188),
+        )
+    )
+
+    assert cited_relevant_pages(
+        answer,
+        {157, 169},
+    ) == ()
+
+
 def test_unsupported_citation_pages_detects_pages_not_retrieved():
     answer = make_answer(
         citations=(

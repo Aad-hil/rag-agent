@@ -47,6 +47,7 @@ class BenchmarkSummary:
 
     answer_rate: float
     citation_rate: float
+    relevant_citation_rate: float
     abstention_rate: float
     valid_citation_rate: float
     unsupported_citation_rate: float
@@ -168,6 +169,7 @@ def evaluate_dataset(
             retrieval_mrr=0.0,
             answer_rate=0.0,
             citation_rate=0.0,
+            relevant_citation_rate=0.0,
             abstention_rate=0.0,
             valid_citation_rate=0.0,
             unsupported_citation_rate=0.0,
@@ -231,6 +233,11 @@ def evaluate_dataset(
         for generation in successful_generations
     )
 
+    relevant_citation_count = sum(
+        bool(generation.cited_relevant_pages)
+        for generation in successful_generations
+    )
+
     abstention_count = sum(
         generation.is_abstention
         for generation in successful_generations
@@ -254,6 +261,7 @@ def evaluate_dataset(
         retrieval_mrr=retrieval_mrr,
         answer_rate=answer_count / total,
         citation_rate=citation_count / total,
+        relevant_citation_rate=relevant_citation_count / total,
         abstention_rate=abstention_count / total,
         valid_citation_rate=valid_citation_count / total,
         unsupported_citation_rate=unsupported_citation_count / total,

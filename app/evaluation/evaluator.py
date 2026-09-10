@@ -1,105 +1,239 @@
+from app.evaluation.benchmark import (
+    BenchmarkQuestionResult,
+    BenchmarkSummary,
+    evaluate_dataset,
+)
 from app.evaluation.dataset import EVALUATION_DATASET
-from app.retrieval.search import search
 
 
-def evaluate_retrieval(limit: int = 5) -> None:
+def _format_pages(pages: tuple[int, ...]) -> str:
     """
-    Evaluate retrieval using:
-    - Recall@k
-    - Precision@k
-    - Mean Reciprocal Rank (MRR)
-    - Retrieval similarity scores
+    Format page numbers for human-readable output.
+    """
+    return str(list(pages))
+
+
+def _question_status(
+    result: BenchmarkQuestionResult,
+) -> str:
+    """
+    Determine the human-readable status for one benchmark question.
+
+    ERROR means the generation pipeline raised an exception.
+
+    PASS means the system produced an answer with at least one
+    citation to an expected relevant page.
+
+    FAIL means the system produced an answer but did not satisfy
+    the citation-quality requirement.
     """
 
-    passed = 0
-    reciprocal_ranks = []
-    precision_scores = []
+    if result.error is not None:
+        return "ERROR"
 
-    for index, item in enumerate(EVALUATION_DATASET, start=1):
-        results = search(item.question, limit=limit)
+    if result.generation is None:
+        return "ERROR"
 
-        retrieved_pages = [
-            result.page_number
-            for result in results
-        ]
+    if (
+        result.generation.has_answer
+        and result.generation.has_citations
+        and result.generation.cited_relevant_pages
+    ):
+        return "PASS"
 
-        expected_pages = set(item.relevant_pages)
+    return "FAIL"
 
-        relevant_count = sum(
-            page in expected_pages
-            for page in retrieved_pages
-        )
 
-        # Recall@k
-        hit = relevant_count > 0
+def _print_question_result(
+    index: int,
+    result: BenchmarkQuestionResult,
+    limit: int,
+) -> None:
+    """
+    Print the evaluation result for one question.
+    """
 
-        if hit:
-            passed += 1
+    status = _question_status(result)
 
-        # MRR
-        reciprocal_rank = 0.0
+    print(f"Q{index:02d} [{status}]")
+    print(f"Question: {result.question}")
+    print(
+        f"Expected pages: "
+        f"{_format_pages(result.expected_pages)}"
+    )
+    print(
+        f"Retrieved pages: "
+        f"{_format_pages(result.retrieved_pages)}"
+    )
 
-        for rank, page in enumerate(retrieved_pages, start=1):
-            if page in expected_pages:
-                reciprocal_rank = 1 / rank
-                break
+    print(
+        f"Retrieval → "
+        f"Hit@{limit}: {result.retrieval_hit_rate:.2f} | "
+        f"Recall@{limit}: {result.retrieval_recall:.2f} | "
+        f"P@{limit}: {result.retrieval_precision:.2f} | "
+        f"RR: {result.retrieval_reciprocal_rank:.2f}"
+    )
 
-        reciprocal_ranks.append(reciprocal_rank)
+    if result.generation is None:
+        print("Generation → ERROR")
 
-        # Precision@k
-        precision = (
-            relevant_count / len(retrieved_pages)
-            if retrieved_pages
-            else 0.0
-        )
-
-        precision_scores.append(precision)
-
-        status = "PASS" if hit else "FAIL"
-
-        print(
-            f"Q{index:02d} [{status}] "
-            f"Expected: {sorted(expected_pages)} "
-            f"P@{limit}: {precision:.2f} "
-            f"RR: {reciprocal_rank:.2f}"
-        )
-
-        for rank, result in enumerate(results, start=1):
-            relevance = (
-                "RELEVANT"
-                if result.page_number in expected_pages
-                else "other"
-            )
-
-            print(
-                f"    #{rank} "
-                f"score={result.score:.4f} "
-                f"page={result.page_number} "
-                f"chunk={result.chunk_index} "
-                f"{relevance}"
-            )
+        if result.error is not None:
+            print(f"    {result.error}")
 
         print()
+        return
 
-    total = len(EVALUATION_DATASET)
+    generation = result.generation
 
-    recall = passed / total if total else 0
-
-    mrr = (
-        sum(reciprocal_ranks) / total
-        if total
-        else 0
+    print(
+        f"Generation → "
+        f"Answer: {'YES' if generation.has_answer else 'NO'} | "
+        f"Abstention: {'YES' if generation.is_abstention else 'NO'} | "
+        f"Citations: {'YES' if generation.has_citations else 'NO'}"
     )
 
-    mean_precision = (
-        sum(precision_scores) / total
-        if total
-        else 0
+    print(
+        f"Cited pages: "
+        f"{_format_pages(generation.citation_pages)}"
+    )
+
+    print(
+        f"Relevant cited pages: "
+        f"{_format_pages(generation.cited_relevant_pages)}"
+    )
+
+    if generation.unsupported_citation_pages:
+        print(
+            f"Unsupported cited pages: "
+            f"{_format_pages(generation.unsupported_citation_pages)}"
+        )
+
+    print()
+
+
+def _print_summary(
+    summary: BenchmarkSummary,
+    limit: int,
+) -> None:
+    """
+    Print aggregate benchmark metrics.
+    """
+
+    total = len(summary.results)
+
+    errors = sum(
+        result.error is not None
+        for result in summary.results
+    )
+
+    passed = sum(
+        _question_status(result) == "PASS"
+        for result in summary.results
+    )
+
+    failed = sum(
+        _question_status(result) == "FAIL"
+        for result in summary.results
     )
 
     print("=" * 60)
-    print(f"Passed: {passed}/{total}")
-    print(f"Recall@{limit}: {recall:.2%}")
-    print(f"Precision@{limit}: {mean_precision:.2%}")
-    print(f"MRR@{limit}: {mrr:.2%}")
+    print("RETRIEVAL")
     print("=" * 60)
+    print(
+        f"Hit Rate@{limit}: "
+        f"{summary.retrieval_hit_rate:.2%}"
+    )
+    print(
+        f"Recall@{limit}:   "
+        f"{summary.retrieval_recall:.2%}"
+    )
+    print(
+        f"Precision@{limit}: "
+        f"{summary.retrieval_precision:.2%}"
+    )
+    print(
+        f"MRR@{limit}:       "
+        f"{summary.retrieval_mrr:.2%}"
+    )
+
+    print()
+    print("=" * 60)
+    print("GENERATION")
+    print("=" * 60)
+    print(
+        f"Answer Rate:              "
+        f"{summary.answer_rate:.2%}"
+    )
+    print(
+        f"Citation Rate:            "
+        f"{summary.citation_rate:.2%}"
+    )
+    print(
+        f"Relevant Citation Rate:   "
+        f"{summary.relevant_citation_rate:.2%}"
+    )
+    print(
+        f"Abstention Rate:          "
+        f"{summary.abstention_rate:.2%}"
+    )
+    print(
+        f"Valid Citation Rate:      "
+        f"{summary.valid_citation_rate:.2%}"
+    )
+    print(
+        f"Unsupported Citation Rate:"
+        f" {summary.unsupported_citation_rate:.2%}"
+    )
+
+    print()
+    print("=" * 60)
+    print("RUN SUMMARY")
+    print("=" * 60)
+    print(f"Questions: {total}")
+    print(f"Passed: {passed}")
+    print(f"Failed: {failed}")
+    print(f"Generation errors: {errors}")
+    print("=" * 60)
+
+
+def evaluate(
+    limit: int = 5,
+) -> BenchmarkSummary:
+    """
+    Run and print the complete RAG evaluation benchmark.
+
+    Returns the BenchmarkSummary so callers can also use the
+    structured results programmatically.
+    """
+
+    summary = evaluate_dataset(
+        dataset=EVALUATION_DATASET,
+        limit=limit,
+    )
+
+    print()
+    print("=" * 60)
+    print("RAG AGENT EVALUATION")
+    print("=" * 60)
+    print()
+
+    for index, result in enumerate(
+        summary.results,
+        start=1,
+    ):
+        _print_question_result(
+            index=index,
+            result=result,
+            limit=limit,
+        )
+
+    _print_summary(
+        summary=summary,
+        limit=limit,
+    )
+
+    return summary
+
+
+if __name__ == "__main__":
+    evaluate()
