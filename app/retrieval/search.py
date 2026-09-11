@@ -5,7 +5,7 @@ from app.ingestion.embeddings import embed_text
 from app.vector_store import qdrant_client
 
 
-@dataclass
+@dataclass(frozen=True)
 class SearchResult:
     text: str
     score: float
@@ -17,9 +17,13 @@ class SearchResult:
 def search(
     query: str,
     limit: int = 5,
+    collection_name: str | None = None,
 ) -> list[SearchResult]:
     """
-    Perform semantic search against Qdrant.
+    Search the configured Qdrant collection.
+
+    A different collection can optionally be supplied for
+    isolated retrieval experiments.
     """
 
     if not query.strip():
@@ -28,10 +32,16 @@ def search(
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
 
+    target_collection = (
+        collection_name
+        if collection_name is not None
+        else settings.qdrant_collection
+    )
+
     query_vector = embed_text(query)
 
     response = qdrant_client.query_points(
-        collection_name=settings.qdrant_collection,
+        collection_name=target_collection,
         query=query_vector,
         limit=limit,
         with_payload=True,

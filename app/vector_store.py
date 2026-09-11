@@ -17,10 +17,19 @@ def check_qdrant_connection() -> bool:
 def create_collection(
     vector_size: int,
     recreate: bool = False,
+    collection_name: str | None = None,
 ) -> None:
     """
-    Create the Qdrant collection if it does not exist.
+    Create a Qdrant collection if it does not exist.
+
+    By default, the configured collection is used.
     """
+
+    target_collection = (
+        collection_name
+        if collection_name is not None
+        else settings.qdrant_collection
+    )
 
     collections = qdrant_client.get_collections()
 
@@ -29,16 +38,16 @@ def create_collection(
         for collection in collections.collections
     }
 
-    if settings.qdrant_collection in existing_names:
+    if target_collection in existing_names:
         if not recreate:
             return
 
         qdrant_client.delete_collection(
-            collection_name=settings.qdrant_collection
+            collection_name=target_collection
         )
 
     qdrant_client.create_collection(
-        collection_name=settings.qdrant_collection,
+        collection_name=target_collection,
         vectors_config=VectorParams(
             size=vector_size,
             distance=Distance.COSINE,
