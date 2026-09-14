@@ -33,22 +33,34 @@ Rules:
 4. For an insufficient-information response, DO NOT include citations.
 5. Keep the answer concise and directly answer the question.
 6. Every factual claim in a normal answer must be supported by the provided context.
-7. Cite supporting context using ONLY the citation IDs provided.
-8. Citation IDs must use exactly this format: [1], [2], [3], etc.
-9. NEVER invent a citation ID.
-10. NEVER cite a page number or chunk number directly.
+7. Answer the complete question. Include important requirements, conditions,
+   constraints, relationships, or definitions that are explicitly stated in
+   the context and are necessary to fully answer the question.
+8. Do not omit a key detail merely because a shorter answer is possible.
+9. Cite supporting context using ONLY the citation IDs provided.
+10. Citation IDs must use exactly this format: [1], [2], [3], etc.
+11. NEVER invent a citation ID.
+12. NEVER cite a page number or chunk number directly.
 """
 
 
 def _extract_citation_ids(answer: str) -> list[int]:
     """
-    Extract citation IDs such as [1], [2], [3].
+    Extract citation IDs such as [1], [2], [3] and [1, 4].
     """
 
-    return [
-        int(value)
-        for value in re.findall(r"\[(\d+)\]", answer)
-    ]
+    citation_ids: list[int] = []
+
+    for match in re.findall(
+        r"\[([0-9]+(?:\s*,\s*[0-9]+)*)\]",
+        answer,
+    ):
+        citation_ids.extend(
+            int(value.strip())
+            for value in match.split(",")
+        )
+
+    return citation_ids
 
 
 def _validate_citations(
@@ -111,8 +123,9 @@ def _render_citations(
     citations: tuple[AnswerCitation, ...],
 ) -> str:
     """
-    Replace internal citation IDs such as [1] with
-    deterministic page citations such as [Page 20].
+    Replace internal citation IDs with deterministic page citations.
+    Supports both individual citations such as [1] and grouped citations
+    such as [1, 4].
     """
 
     citation_map = {
@@ -121,16 +134,27 @@ def _render_citations(
     }
 
     def replace(match: re.Match[str]) -> str:
-        citation_id = int(match.group(1))
-        citation = citation_map.get(citation_id)
+        citation_ids = [
+            int(value.strip())
+            for value in match.group(1).split(",")
+        ]
 
-        if citation is None:
-            return match.group(0)
+        rendered_pages = []
 
-        return f"[Page {citation.page_number}]"
+        for citation_id in citation_ids:
+            citation = citation_map.get(citation_id)
+
+            if citation is None:
+                return match.group(0)
+
+            rendered_pages.append(
+                f"[Page {citation.page_number}]"
+            )
+
+        return ", ".join(rendered_pages)
 
     return re.sub(
-        r"\[(\d+)\]",
+        r"\[([0-9]+(?:\s*,\s*[0-9]+)*)\]",
         replace,
         answer,
     )
@@ -214,4 +238,3 @@ def answer_question(
         question,
         search(question, limit=limit),
     )
-

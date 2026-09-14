@@ -5,6 +5,7 @@ from app.evaluation.benchmark import (
     evaluate_question,
 )
 from app.evaluation.dataset import EvaluationQuestion
+from app.evaluation.judge import JudgeResult
 from app.generation.answer import Answer, AnswerCitation
 from app.retrieval.search import SearchResult
 
@@ -85,6 +86,7 @@ def test_evaluate_question_uses_retrieval_results_for_generation():
     )
 
     assert result.error is None
+    assert result.answer_quality is None
 
     assert result.retrieved_pages == (
         20,
@@ -104,6 +106,85 @@ def test_evaluate_question_uses_retrieval_results_for_generation():
     assert result.generation.citation_pages == (
         20,
         21,
+    )
+
+
+def test_evaluate_question_runs_answer_quality_judges():
+    item = EvaluationQuestion(
+        question="What happens?",
+        relevant_pages=(20,),
+        reference_answer="The system retrieves context.",
+    )
+
+    results = [
+        make_search_result(20),
+        make_search_result(50),
+    ]
+
+    answer = make_answer(
+        citations=(
+            make_citation(1, 20),
+        ),
+    )
+
+    with patch(
+        "app.evaluation.benchmark.search",
+        return_value=results,
+    ), patch(
+        "app.evaluation.benchmark.answer_from_results",
+        return_value=answer,
+    ), patch(
+        "app.evaluation.benchmark.judge_correctness",
+        return_value=JudgeResult(
+            score=1.0,
+            reason="The answer is correct.",
+        ),
+    ) as mocked_correctness, patch(
+        "app.evaluation.benchmark.judge_groundedness",
+        return_value=JudgeResult(
+            score=0.5,
+            reason="The answer is partially supported.",
+        ),
+    ) as mocked_groundedness:
+
+        result = evaluate_question(
+            item=item,
+            limit=2,
+        )
+
+    assert result.error is None
+    assert result.answer_quality is not None
+
+    assert result.answer_quality.correctness_score == 1.0
+    assert result.answer_quality.correctness_reason == (
+        "The answer is correct."
+    )
+
+    assert result.answer_quality.groundedness_score == 0.5
+    assert result.answer_quality.groundedness_reason == (
+        "The answer is partially supported."
+    )
+
+    assert result.answer_quality.citation_correctness_score == 1.0
+
+    mocked_correctness.assert_called_once_with(
+        question="What happens?",
+        reference_answer="The system retrieves context.",
+        generated_answer="This is a test answer.",
+    )
+
+    mocked_groundedness.assert_called_once()
+
+    groundedness_kwargs = (
+        mocked_groundedness.call_args.kwargs
+    )
+
+    assert groundedness_kwargs["question"] == "What happens?"
+    assert groundedness_kwargs["generated_answer"] == (
+        "This is a test answer."
+    )
+    assert "Content from page 20." in (
+        groundedness_kwargs["retrieved_context"]
     )
 
 
@@ -133,6 +214,7 @@ def test_evaluate_question_preserves_retrieval_metrics_when_generation_fails():
         )
 
     assert result.generation is None
+    assert result.answer_quality is None
     assert result.error is not None
     assert "ValueError" in result.error
     assert "Invalid citation IDs" in result.error
@@ -166,6 +248,10 @@ def test_evaluate_dataset_handles_empty_dataset():
     assert summary.abstention_rate == 0.0
     assert summary.valid_citation_rate == 0.0
     assert summary.unsupported_citation_rate == 0.0
+
+    assert summary.correctness_score == 0.0
+    assert summary.groundedness_score == 0.0
+    assert summary.citation_correctness_score == 0.0
 
 
 def test_evaluate_dataset_aggregates_results():
@@ -229,6 +315,10 @@ def test_evaluate_dataset_aggregates_results():
     assert summary.abstention_rate == 0.0
     assert summary.valid_citation_rate == 1.0
     assert summary.unsupported_citation_rate == 0.0
+
+    assert summary.correctness_score == 0.0
+    assert summary.groundedness_score == 0.0
+    assert summary.citation_correctness_score == 0.0
 
 
 def test_evaluate_dataset_counts_generation_errors_as_non_answers():
@@ -324,3 +414,5 @@ def test_evaluate_dataset_records_unsupported_citation():
     assert summary.results[0].generation.unsupported_citation_pages == (
         99,
     )
+
+    assert summary.results[0].answer_quality is None
