@@ -1,0 +1,13 @@
+.venv/
+.idea/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+.env
+
+.git/
+.gitignore
+
+tests/
+data/

@@ -1,8 +1,6 @@
 import requests
 
-
-OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "gemma3"
+from app.config import settings
 
 
 def generate(
@@ -10,7 +8,7 @@ def generate(
     system_prompt: str | None = None,
 ) -> str:
     """
-    Generate a response using the local Ollama model.
+    Generate a response using the configured Ollama model.
     """
 
     messages = []
@@ -31,9 +29,9 @@ def generate(
     )
 
     response = requests.post(
-        OLLAMA_URL,
+        settings.ollama_url,
         json={
-            "model": MODEL_NAME,
+            "model": settings.ollama_model,
             "messages": messages,
             "stream": False,
         },
@@ -45,3 +43,4 @@ def generate(
     data = response.json()
 
     return data["message"]["content"]
+

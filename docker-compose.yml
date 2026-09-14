@@ -25,8 +25,30 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - data_qdrant_data:/qdrant/storage
+
+  app:
+    image: rag-agent:latest
+    container_name: rag-agent-app
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://rag_user:rag_password@postgres:5432/rag_agent
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: documents
+      OLLAMA_URL: http://host.docker.internal:11434/api/chat
+      OLLAMA_MODEL: gemma3
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-rag-agent}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
 
 volumes:
   postgres_data:
-  qdrant_data:
+  data_qdrant_data:
+    external: true
