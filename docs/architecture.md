@@ -2,378 +2,186 @@
 
 This document describes the architecture of the currently implemented RAG Agent. It focuses on the actual application path rather than planned or experimental components.
 
+## Architecture diagram
+
+![RAG Agent detailed logical architecture](architecture.svg)
+
 ## 1. System architecture
 
-```mermaid
-flowchart TB
-    Client["API Client"]
+```text
+Client
+  │
+  ▼
+FastAPI
+  │
+  ▼
+LangGraph Agent
+  │
+  ├── Retrieve ───────────────► Qdrant
+  │
+  ├── Relevance Check
+  │       │
+  │       └── Not relevant ───► Rewrite Query ───► Retrieve
+  │
+  ├── Generate Answer ────────► Ollama / Gemma 3
+  │
+  └── Validate Answer + Citations
+             │
+             ├── Valid ───────► Return answer
+             └── Invalid ─────► Abstain
 
-    subgraph App["RAG Agent Application"]
-        API["FastAPI"]
-
-        subgraph Agent["LangGraph Agent"]
-            Retrieve["Retrieve"]
-            Relevance["Check Relevance"]
-            Rewrite["Rewrite Query"]
-            Generate["Generate Answer"]
-            Validate["Validate Answer"]
-            Abstain["Abstain"]
-        end
-    end
-
-    Qdrant["Qdrant<br/>Vector Store"]
-    PostgreSQL["PostgreSQL"]
-    Ollama["Ollama<br/>Gemma 3"]
-    LangSmith["LangSmith"]
-    Eval["Evaluation Suite"]
-
-    Client -->|POST /query| API
-    API --> Agent
-    Retrieve -->|Semantic Search| Qdrant
-    Qdrant -->|Search Results| Relevance
-    Relevance -->|Relevant| Generate
-    Relevance -->|Not Relevant| Rewrite
-    Rewrite --> Retrieve
-    Generate -->|Prompt + Context| Ollama
-    Ollama -->|Generated Answer| Generate
-    Generate --> Validate
-    Validate -->|Valid| API
-    Validate -->|Invalid| Abstain
-    Abstain --> API
-    API --> PostgreSQL
-    Agent -. tracing .-> LangSmith
-    Eval -. retrieval evaluation .-> Qdrant
-    Eval -. generation evaluation .-> Generate
+PostgreSQL ── application dependency / health check
+LangSmith ─── tracing and evaluation visibility
+Evaluation ── benchmark and quality measurement
 ```
 
 ## 2. Layered architecture
 
+### Client layer
+
+The current API is consumed through HTTP clients such as the FastAPI Swagger UI, curl, or Postman. The implemented endpoints are `/health` and `/query`.
+
+### Application layer
+
+FastAPI is responsible for request validation, API routing, dependency checks, exception handling, logging, and invoking the LangGraph workflow.
+
+### Agent layer
+
+LangGraph models the RAG workflow as explicit state transitions:
+
 ```text
-┌────────────────────────────────────────────────────┐
-│                    Client Layer                    │
-│              API client / curl / Postman           │
-└──────────────────────────┬─────────────────────────┘
-                           │
-                           ▼
-┌────────────────────────────────────────────────────┐
-│                 Application Layer                  │
-│                     FastAPI                        │
-│          Validation / Error Handling / API         │
-└──────────────────────────┬─────────────────────────┘
-                           │
-                           ▼
-┌────────────────────────────────────────────────────┐
-│                    Agent Layer                     │
-│                    LangGraph                       │
-│                                                    │
-│ Retrieve → Relevance → Rewrite → Generate → Validate│
-└───────────────┬────────────────────┬───────────────┘
-                │                    │
-                ▼                    ▼
-┌───────────────────────┐   ┌────────────────────────┐
-│      Data Layer       │   │       Model Layer       │
-│                       │   │                        │
-│ Qdrant                │   │ Ollama / Gemma 3       │
-│ PostgreSQL            │   │ Embedding model        │
-└───────────────────────┘   └────────────────────────┘
-                │
-                ▼
-┌────────────────────────────────────────────────────┐
-│             Observability / Evaluation             │
-│                 LangSmith + tests                  │
-└────────────────────────────────────────────────────┘
+START
+  ↓
+Retrieve
+  ↓
+Check Relevance
+  ├── relevant ──→ Generate Answer ──→ Validate Answer ──→ END
+  │
+  └── not relevant ──→ Rewrite Query ──→ Retrieve
+                                      
+Validation failure ──→ Abstain ──→ END
 ```
+
+The current retry limit is one rewrite/retrieval iteration.
+
+### Data layer
+
+Qdrant stores document embeddings and metadata used for semantic retrieval and citations. PostgreSQL is currently integrated as an application dependency and is health-checked by the API; it is not yet the primary conversation-memory store.
+
+### Model layer
+
+Ollama provides local model inference using Gemma 3. The embedding model is used by the retrieval pipeline to represent document chunks and queries in vector space.
+
+### Observability and evaluation
+
+LangSmith provides tracing and evaluation visibility. The local evaluation suite measures retrieval, generation, citation behavior, correctness, and groundedness.
 
 ## 3. Request lifecycle
 
-```text
-1. Client sends POST /query
-             │
-             ▼
-2. FastAPI validates request
-             │
-             ▼
-3. LangGraph receives initial state
-             │
-             ▼
-4. Retrieval searches Qdrant
-             │
-             ▼
-5. Retrieved chunks are evaluated for relevance
-             │
-       ┌─────┴─────┐
-       │           │
-    Relevant    Not relevant
-       │           │
-       ▼           ▼
-   Generate     Rewrite query
-       │           │
-       │           └──────► Retrieve again
-       │
-       ▼
-6. Answer generated using retrieved context
-       │
-       ▼
-7. Answer validation
-       │
-   ┌───┴────┐
-   │        │
- Valid    Invalid
-   │        │
-   ▼        ▼
- END      Abstain
-```
+1. A client sends a question to `POST /query`.
+2. FastAPI validates the request body.
+3. The request is passed to the LangGraph agent with an initial retry count.
+4. Retrieval searches Qdrant for the top-k relevant chunks.
+5. The agent checks retrieval relevance.
+6. If results are not relevant and a retry remains, the query is rewritten and retrieval runs again.
+7. Relevant context is assembled for generation.
+8. Ollama/Gemma 3 generates an answer with citations.
+9. Citation and answer validation is performed.
+10. The API returns the answer and structured citation metadata, or an abstention response when validation fails.
 
-The retry path is bounded by the configured maximum retry count.
+## 4. Agent state
 
-## 4. LangGraph state
+The workflow maintains explicit state containing the question, optional rewritten query, retry count, retrieved search results, relevance status, generated answer, and answer-validation status.
 
-The agent maintains explicit state during execution:
+This makes routing decisions observable and testable instead of embedding control flow inside a single generation function.
 
-```text
-AgentState
-│
-├── question
-├── rewritten_query
-├── retry_count
-├── results
-├── is_relevant
-├── answer
-└── is_answer_valid
-```
+## 5. Retrieval
 
-This allows graph routing decisions to depend on the current state.
-
-## 5. Retrieval architecture
+The retrieval path is:
 
 ```text
 Question
-   │
-   ▼
+   ↓
 Embedding
-   │
-   ▼
-Qdrant Collection
-   │
-   ▼
-Cosine Similarity Search
-   │
-   ▼
-Top-k Search Results
+   ↓
+Qdrant semantic search
+   ↓
+Top-k SearchResult objects
+   ↓
+Relevance evaluation
 ```
 
-Retrieved results retain metadata used by downstream generation and evaluation, including source, page number, chunk index, and text.
+Search results retain source, page number, chunk index, and text. This metadata is carried forward into the generation and citation layers.
 
-## 6. Relevance and retry
+## 6. Query rewriting
+
+When retrieval is judged insufficiently relevant, the agent rewrites the original question and retries retrieval. The retry is bounded to prevent uncontrolled loops.
 
 ```text
 Retrieve
-   │
-   ▼
+   ↓
 Relevance Check
-   │
-   ├── Relevant ───────────────► Generate
-   │
-   └── Not Relevant
-            │
-            ▼
-       Rewrite Query
-            │
-            ▼
-         Retrieve
+   └── Not relevant
+          ↓
+     Rewrite Query
+          ↓
+       Retrieve
 ```
 
-The current configuration uses `MAX_RETRIES = 1`, creating a bounded recovery mechanism rather than an unrestricted loop.
+## 7. Generation and citations
 
-## 7. Generation architecture
+Retrieved chunks are converted into a structured context and supplied to the local LLM. The answer object contains answer text and structured citation objects.
 
-```text
-Retrieved Results
-       │
-       ▼
-Context Builder
-       │
-       ▼
-System Instructions
-       +
-Question
-       +
-Retrieved Context
-       │
-       ▼
-Ollama
-       │
-       ▼
-Gemma 3
-       │
-       ▼
-Generated Answer
-```
+A citation records information such as:
 
-The generation layer produces an answer from retrieved context and preserves citation information.
+- citation ID
+- source
+- page number
+- chunk index
 
-## 8. Citation architecture
+Citation evaluation checks whether citations exist, whether their IDs are valid, and whether cited pages were actually retrieved. Unsupported citation pages are separately measured.
 
-Citations are represented as structured metadata:
+## 8. Abstention
 
-```text
-Answer
-│
-├── text
-└── citations
-      │
-      ├── citation_id
-      ├── source
-      ├── page_number
-      └── chunk_index
-```
-
-Citation validation checks whether citations exist, citation IDs are valid, cited pages were retrieved, and unsupported citation pages are present.
-
-## 9. Abstention
-
-If the system cannot produce a valid answer after the workflow's validation stage, it can return a safe abstention:
+If the answer cannot pass the validation stage, the workflow can return:
 
 ```text
 The provided documents do not contain enough information to answer this question.
 ```
 
-The goal is to prefer an explicit lack-of-evidence response over an unsupported answer.
+This creates an explicit failure path instead of requiring the model to produce an unsupported answer.
 
-## 10. PostgreSQL role
+## 9. PostgreSQL
 
-PostgreSQL is part of the current application infrastructure. The API health endpoint verifies connectivity using `SELECT 1`.
+PostgreSQL is part of the current application infrastructure. The `/health` endpoint executes a simple database connectivity check. Persistent conversation memory is a future extension rather than a current feature.
 
-The current application does not yet use PostgreSQL as its primary conversation-memory store. Conversation persistence is therefore a future extension rather than a currently implemented feature.
+## 10. Observability
 
-## 11. Observability
+LangSmith traces the agent execution and makes the major workflow stages visible, including retrieval, relevance checking, rewriting when required, generation, and validation. Application logging is configured separately for local and containerized execution.
 
-LangSmith is used for LangGraph tracing and evaluation visibility. A traced execution can be understood as:
+## 11. Evaluation architecture
 
-```text
-LangGraph Run
-│
-├── Retrieve
-├── Check Relevance
-├── Rewrite Query       (if required)
-├── Generate Answer
-└── Validate Answer
-```
-
-Application logging is configured separately using Python's logging system.
-
-## 12. Evaluation architecture
-
-The evaluation system is separated from the application runtime:
+The evaluation framework is separate from the normal API runtime and evaluates the production retrieval/generation path.
 
 ```text
 Evaluation Dataset
-       │
-       ▼
-┌──────────────────┐
-│ Retrieval Eval   │
-└────────┬─────────┘
-         │
-         ├── Hit Rate@5
-         ├── Recall@5
-         ├── Precision@5
-         └── MRR@5
-
-       │
-       ▼
-┌──────────────────┐
-│ Generation Eval  │
-└────────┬─────────┘
-         │
-         ├── Answer Rate
-         ├── Citation Rate
-         ├── Citation Validity
-         └── Abstention
-
-       │
-       ▼
-┌──────────────────┐
-│ Answer Quality   │
-└────────┬─────────┘
-         │
-         ├── Correctness
-         ├── Groundedness
-         └── Citation Correctness
-```
-
-## 13. Benchmark dataset
-
-The current benchmark contains 10 questions covering topics such as LangChain Orchestrator behavior, DynamoDB usage, RAG document retrieval, Workflow Builder, Agent Builder, RAG prompt construction, query rephrasing, conversation history, monitoring services, and supported AWS Regions.
-
-The benchmark uses expected document pages and reference answers.
-
-## 14. Final benchmark architecture
-
-```text
-Evaluation Question
-       │
-       ▼
+       ↓
 Production Retrieval
-       │
-       ▼
-Top-5 Results
-       │
-       ├── Retrieval Metrics
-       │
-       ▼
+       ↓
+Retrieval Metrics
+       ↓
 Production Generation
-       │
-       ▼
+       ↓
 Citation Validation
-       │
-       ├── Generation Metrics
-       │
-       ▼
+       ↓
 Answer Quality Judges
-       │
-       ├── Correctness
-       ├── Groundedness
-       └── Citation Correctness
 ```
 
-The production retrieval/generation path remains frozen while experimental optimizations are evaluated separately.
+Retrieval metrics include Hit Rate@5, Recall@5, Precision@5, and MRR@5. Generation metrics include answer rate, citation rate, relevant citation rate, abstention rate, valid citation rate, and unsupported citation rate. Answer-quality metrics include correctness, groundedness, and citation correctness.
 
-## 15. Docker architecture
+## 12. Final measured baseline
 
-```text
-┌──────────────────────────────────────────────┐
-│              Docker Compose                  │
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │ rag-agent-app                          │  │
-│  │                                        │  │
-│  │ FastAPI + LangGraph + RAG pipeline    │  │
-│  │ Port: 8000                            │  │
-│  └──────────────┬─────────────┬───────────┘  │
-│                 │             │              │
-│                 ▼             ▼              │
-│       ┌──────────────┐ ┌───────────────┐    │
-│       │ PostgreSQL   │ │ Qdrant        │    │
-│       │ Port 5432    │ │ Port 6333     │    │
-│       └──────────────┘ └───────────────┘    │
-│                                              │
-└──────────────────────────────────────────────┘
-                       │
-                       ▼
-              Host Ollama / Gemma 3
-```
-
-The application container accesses Ollama through `host.docker.internal:11434`. The Qdrant storage volume is external so existing vector data can be preserved across application container rebuilds.
-
-## 16. Experimental evaluation architecture
-
-The repository contains separate experiments involving chunking, retrieval diagnostics, reranking, multi-query retrieval, and query rewriting. These experiments are kept separate from the frozen production path so optimization remains measurable and reversible.
-
-## 17. Performance observation
-
-LangSmith tracing showed that local LLM generation dominates request latency. The architecture therefore keeps retrieval and generation stages distinct so future performance work can target the actual bottleneck.
-
-## 18. Final measured baseline
+The final 10-question benchmark produced:
 
 | Metric | Result |
 |---|---:|
@@ -391,43 +199,43 @@ LangSmith tracing showed that local LLM generation dominates request latency. Th
 | Groundedness | 100.00% |
 | Citation Correctness | 100.00% |
 
-These values represent the documented baseline for future retrieval and generation optimization.
+This baseline is preserved for future retrieval and generation optimization.
 
-## 19. Design principles
+## 13. Docker topology
 
-### Explicit orchestration
+The Docker Compose deployment contains three services:
 
-Agent behavior is represented as a graph rather than hidden inside a large function.
+```text
+Docker Compose
+│
+├── rag-agent-app
+│     └── FastAPI + LangGraph + RAG pipeline
+│
+├── rag-agent-postgres
+│     └── PostgreSQL 16
+│
+└── rag-agent-qdrant
+      └── Qdrant
+```
 
-### Bounded recovery
+Ollama runs on the host machine and is reached by the application container through `host.docker.internal:11434`. The application listens on port `8000`, PostgreSQL on `5432`, and Qdrant on `6333`/`6334`.
 
-Query rewriting has a defined retry limit.
+## 14. Experimental work
 
-### Evidence-first generation
+The repository also contains isolated evaluation modules for chunking, retrieval diagnostics, reranking, multi-query retrieval, and query rewriting. These experiments are intentionally separated from the frozen production path so optimization can be measured without silently changing the benchmark baseline.
 
-Answers are generated from retrieved context rather than unconstrained model knowledge.
+## 15. Design principles
 
-### Structured citations
+- **Explicit orchestration:** agent behavior is represented as a graph rather than hidden inside a large function.
+- **Bounded recovery:** query rewriting has a defined retry limit.
+- **Evidence-first generation:** answers are generated from retrieved context.
+- **Structured citations:** citation metadata is represented separately from answer text.
+- **Measurable quality:** retrieval and generation are evaluated independently.
+- **Observable execution:** LangSmith provides visibility into agent execution.
+- **Reproducible infrastructure:** Docker provides a consistent service environment.
+- **Incremental development:** major subsystems were implemented and validated before the next layer.
 
-Citation metadata is represented separately from answer text.
-
-### Measurable quality
-
-Retrieval and generation are evaluated independently.
-
-### Observable execution
-
-LangSmith provides visibility into agent execution.
-
-### Reproducible infrastructure
-
-Docker provides a consistent service environment.
-
-### Incremental development
-
-Each major subsystem was implemented and validated before the next layer was introduced.
-
-## 20. Current architecture vs future architecture
+## 16. Current architecture vs future architecture
 
 ### Implemented
 
