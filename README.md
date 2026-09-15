@@ -1,151 +1,81 @@
 # RAG Agent
 
-A production-oriented Retrieval-Augmented Generation (RAG) agent built incrementally with **FastAPI, LangGraph, Qdrant, PostgreSQL, Ollama, LangSmith, Docker, and pytest**.
+A production-oriented Retrieval-Augmented Generation (RAG) agent built with **FastAPI, LangGraph, Qdrant, PostgreSQL, Ollama, LangSmith, Docker, and pytest**.
 
-The project focuses on more than simply retrieving documents and generating an answer. It implements an agent workflow with **retrieval relevance checking, query rewriting, grounded answer generation, citation validation, automated evaluation, observability, and containerized deployment**.
+The project demonstrates an agentic RAG workflow with retrieval relevance checking, bounded query rewriting, grounded answer generation, citation validation, automated evaluation, observability, testing, and containerized deployment.
 
----
-
-## Overview
-
-The system accepts a natural-language question through a FastAPI endpoint and processes it through a LangGraph stateful workflow:
-
-```text
-User Question
-      │
-      ▼
-   FastAPI
-      │
-      ▼
- LangGraph Agent
-      │
-      ▼
-   Retrieve
-      │
-      ▼
- Relevance Check
-      │
-      ├──────────── Relevant ─────────────┐
-      │                                   │
-      │                                   ▼
-      │                              Generate Answer
-      │                                   │
-      │                                   ▼
-      │                              Validate Answer
-      │                                   │
-      │                                   ▼
-      │                              Answer + Citations
-      │
-      └──── Not Relevant
-              │
-              ▼
-        Rewrite Query
-              │
-              ▼
-           Retrieve
-```
-
-The retrieval layer uses **Qdrant** for semantic search, while **Ollama running Gemma 3** provides local LLM inference.
-
----
-
-## Why this project?
-
-A basic RAG application can often be summarized as:
-
-```text
-Question → Vector Search → LLM → Answer
-```
-
-That approach does not adequately address several engineering concerns:
-
-- What happens when retrieval returns irrelevant documents?
-- How does the system recover from a poor query?
-- Can generated claims be traced back to retrieved evidence?
-- Can unsupported citations be detected?
-- How do we measure retrieval quality independently from generation quality?
-- How do we detect groundedness and correctness regressions?
-- How can the application be observed and tested?
-- Can the system run consistently inside containers?
-
-This project was built to explore those problems systematically.
-
----
-
-# Architecture
-
-The application is organized into logical layers.
+## Architecture
 
 ```mermaid
 flowchart TB
-    Client["Client / API Consumer"]
-
-    subgraph Application["Application Layer"]
-        API["FastAPI<br/>REST API"]
-        Agent["LangGraph Agent"]
-
-        subgraph Workflow["Agent Workflow"]
-            Retrieve["Retrieve"]
-            Relevance["Relevance Check"]
-            Rewrite["Rewrite Query"]
-            Generate["Generate Answer"]
-            Validate["Validate Answer"]
-            Abstain["Abstain"]
-        end
-    end
-
-    subgraph Data["Data Layer"]
-        Qdrant["Qdrant<br/>Vector Store"]
-        PostgreSQL["PostgreSQL<br/>Application Dependency"]
-    end
-
-    subgraph Model["Model Layer"]
-        Ollama["Ollama<br/>Gemma 3"]
-        Embeddings["Embedding Model"]
-    end
-
-    subgraph Observability["Observability & Evaluation"]
-        LangSmith["LangSmith<br/>Tracing / Evaluation"]
-        Logging["Structured Application Logging"]
-        Benchmark["Benchmark Suite"]
-    end
-
-    Client -->|HTTPS / REST| API
-    API --> Agent
-    Agent --> Retrieve
-    Retrieve --> Qdrant
-    Qdrant --> Relevance
-    Relevance -->|Relevant| Generate
-    Relevance -->|Not relevant| Rewrite
+    Client[Client / API Consumer] --> API[FastAPI]
+    API --> Agent[LangGraph Agent]
+    Agent --> Retrieve[Retrieve]
+    Retrieve --> Qdrant[Qdrant Vector Store]
+    Qdrant --> Relevance[Relevance Check]
+    Relevance -->|Relevant| Generate[Generate Answer]
+    Relevance -->|Not Relevant| Rewrite[Rewrite Query]
     Rewrite --> Retrieve
-    Generate --> Ollama
-    Generate --> Validate
+    Generate --> Ollama[Ollama / Gemma 3]
+    Generate --> Validate[Validate Answer]
     Validate -->|Valid| API
-    Validate -->|Invalid| Abstain
+    Validate -->|Invalid| Abstain[Abstain]
     Abstain --> API
-    Embeddings --> Qdrant
-    API --> PostgreSQL
-    Agent -. traces .-> LangSmith
-    API -. logs .-> Logging
-    Benchmark -. evaluates .-> Retrieve
-    Benchmark -. evaluates .-> Generate
+    API --> PostgreSQL[PostgreSQL]
+    Agent -. traces .-> LangSmith[LangSmith]
+    API -. logs .-> Logging[Application Logging]
+    Benchmark[Evaluation] -. evaluates .-> Agent
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for the detailed logical architecture, state model, request lifecycle, citation flow, evaluation architecture, and Docker topology.
+See [`docs/architecture.md`](docs/architecture.md) for the detailed architecture and [`docs/architecture.svg`](docs/architecture.svg) for the implementation-accurate diagram.
 
----
+See [`docs/retrieval-optimization.md`](docs/retrieval-optimization.md) for the retrieval experiments and final retrieval decision.
 
-# Core workflow
-
-## 1. Request
-
-The client sends a question to:
+## Core workflow
 
 ```text
-POST /query
+Question
+   │
+   ▼
+ FastAPI
+   │
+   ▼
+LangGraph
+   │
+   ▼
+Retrieve → Relevance Check
+              │
+       ┌──────┴──────┐
+       │             │
+   Relevant       Not Relevant
+       │             │
+       ▼             ▼
+ Generate        Rewrite Query
+       │             │
+       ▼             └──► Retrieve
+ Validate
+       │
+  ┌────┴────┐
+  │         │
+ Valid    Invalid
+  │         │
+  ▼         ▼
+ END     Abstain
 ```
 
-Example:
+The retry path is bounded to **1 retry**.
+
+## API
+
+### `GET /health`
+
+Checks PostgreSQL and Qdrant connectivity.
+
+### `POST /query`
+
+Accepts a question and returns an answer with structured citation metadata.
+
+Example request:
 
 ```json
 {
@@ -153,454 +83,7 @@ Example:
 }
 ```
 
----
-
-## 2. FastAPI
-
-FastAPI performs request validation and invokes the LangGraph agent.
-
-The API exposes:
-
-```text
-GET  /health
-POST /query
-```
-
-The `/health` endpoint checks connectivity to:
-
-- PostgreSQL
-- Qdrant
-
----
-
-## 3. LangGraph orchestration
-
-The agent is implemented as a stateful LangGraph workflow.
-
-The current workflow is:
-
-```text
-START
-  │
-  ▼
-Retrieve
-  │
-  ▼
-Check Relevance
-  │
-  ├── Relevant ──► Generate Answer
-  │                       │
-  │                       ▼
-  │                 Validate Answer
-  │                       │
-  │                       ├── Valid ──► END
-  │                       │
-  │                       └── Invalid ──► Abstain
-  │
-  ├── Not Relevant
-  │
-  ▼
-Rewrite Query
-  │
-  ▼
-Retrieve
-  │
-  ▼
-...
-```
-
-The workflow supports a bounded retry path for poor retrieval.
-
-The current maximum retry count is **1**.
-
----
-
-# Retrieval
-
-Qdrant is used as the vector database.
-
-The retrieval pipeline is:
-
-```text
-Question
-   │
-   ▼
-Embedding
-   │
-   ▼
-Qdrant Semantic Search
-   │
-   ▼
-Top-k Search Results
-   │
-   ▼
-Relevance Evaluation
-```
-
-Each retrieved result retains document metadata such as:
-
-- source
-- page number
-- chunk index
-- retrieved text
-
-This metadata is later used for citation generation and validation.
-
----
-
-# Query rewriting
-
-When retrieved results are judged insufficiently relevant, the agent can rewrite the original query and perform retrieval again.
-
-```text
-Original Question
-       │
-       ▼
-   Retrieval
-       │
-       ▼
- Relevance Check
-       │
-       └── Not Relevant
-              │
-              ▼
-        Rewrite Query
-              │
-              ▼
-           Retrieval
-```
-
-The retry mechanism is intentionally bounded.
-
----
-
-# Grounded answer generation
-
-Relevant retrieved chunks are converted into structured context and supplied to the local LLM.
-
-The current model path is:
-
-```text
-Ollama
-└── Gemma 3
-```
-
-The generation layer is designed to:
-
-- answer using retrieved context
-- avoid unsupported claims
-- include citations
-- preserve citation metadata
-- abstain when an answer cannot be safely supported
-
----
-
-# Citation system
-
-Generated answers contain page-based citations such as:
-
-```text
-The LangChain Orchestrator receives requests through API Gateway and processes them through SQS. [Page 20]
-```
-
-The system validates:
-
-1. Whether citations exist
-2. Whether citation IDs are valid
-3. Whether cited pages belong to retrieved results
-4. Whether unsupported citation pages are present
-
-This allows citation correctness to be measured independently from answer correctness.
-
----
-
-# Evaluation
-
-The project includes a dedicated evaluation framework under:
-
-```text
-app/evaluation/
-```
-
-The current benchmark contains **10 questions**.
-
-The evaluation covers both retrieval and generation.
-
-## Retrieval metrics
-
-- Hit Rate@5
-- Recall@5
-- Precision@5
-- MRR@5
-
-## Generation metrics
-
-- Answer Rate
-- Citation Rate
-- Relevant Citation Rate
-- Abstention Rate
-- Valid Citation Rate
-- Unsupported Citation Rate
-
-## Answer quality
-
-- Correctness
-- Groundedness
-- Citation Correctness
-
-The evaluation framework also contains separate experiment modules for retrieval and generation strategies without changing the frozen production path.
-
----
-
-# Final benchmark
-
-The final 10-question benchmark produced the following results.
-
-## Retrieval
-
-| Metric | Result |
-|---|---:|
-| Hit Rate@5 | **100.00%** |
-| Recall@5 | **91.67%** |
-| Precision@5 | **48.00%** |
-| MRR@5 | **88.33%** |
-
-## Generation
-
-| Metric | Result |
-|---|---:|
-| Answer Rate | **100.00%** |
-| Citation Rate | **100.00%** |
-| Relevant Citation Rate | **100.00%** |
-| Abstention Rate | **0.00%** |
-| Valid Citation Rate | **100.00%** |
-| Unsupported Citation Rate | **0.00%** |
-
-## Answer quality
-
-| Metric | Result |
-|---|---:|
-| Correctness | **90.00%** |
-| Groundedness | **100.00%** |
-| Citation Correctness | **100.00%** |
-
-### Benchmark observations
-
-The benchmark demonstrated that:
-
-- Every evaluated question retrieved at least one relevant page.
-- Retrieval recall@5 reached 91.67%.
-- All evaluated questions produced answers.
-- All generated answers contained valid citations.
-- No unsupported citations were detected.
-- Groundedness reached 100%.
-- Answer correctness reached 90%.
-
-The remaining correctness issues were primarily **answer precision and scope**, rather than unsupported generation. Two questions received partial correctness scores because one answer was somewhat incomplete and another included an additional grounded service that was outside the benchmark reference answer.
-
----
-
-# Observability
-
-The application integrates with **LangSmith** for tracing and evaluation visibility.
-
-A traced execution can be inspected as a graph containing components such as:
-
-```text
-LangGraph
- ├── Retrieve
- ├── Relevance Check
- ├── Rewrite
- ├── Generate
- └── Validate
-```
-
-Application-level logging is also configured for local and containerized execution.
-
----
-
-# Testing
-
-The project includes tests across the major application layers:
-
-```text
-tests/
-├── agent/
-├── api/
-├── config/
-├── evaluation/
-├── generation/
-├── ingestion/
-├── llm/
-└── retrieval/
-```
-
-Coverage includes:
-
-- API behavior
-- configuration validation
-- agent routing
-- retrieval
-- generation
-- citation handling
-- evaluation metrics
-- answer quality
-- benchmark behavior
-- LLM integration
-
-Targeted tests are used during development for faster iteration, while the broader suite is run at checkpoints.
-
----
-
-# Docker
-
-The application can be run with Docker Compose.
-
-The current containerized architecture contains:
-
-```text
-Docker Compose
-│
-├── rag-agent-app
-│     └── FastAPI + LangGraph
-│
-├── rag-agent-postgres
-│     └── PostgreSQL 16
-│
-└── rag-agent-qdrant
-      └── Qdrant
-```
-
-Ollama runs on the host machine and is accessed by the application container through:
-
-```text
-host.docker.internal:11434
-```
-
-The application container exposes port `8000`.
-
----
-
-# Local setup
-
-## Prerequisites
-
-Install:
-
-- Python 3.13
-- Docker Desktop
-- Ollama
-- Git
-
-Pull the configured model:
-
-```powershell
-ollama pull gemma3
-```
-
----
-
-## Clone
-
-```powershell
-git clone https://github.com/Aad-hil/rag-agent.git
-cd rag-agent
-```
-
----
-
-## Create virtual environment
-
-```powershell
-python -m venv .venv
-```
-
-Activate it in PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
----
-
-## Install dependencies
-
-```powershell
-pip install -r requirements.txt
-```
-
----
-
-## Configure environment
-
-Copy `.env.example` to `.env` and configure the required values for PostgreSQL, Qdrant, Ollama, and optionally LangSmith.
-
-Never commit `.env`.
-
----
-
-# Run dependencies
-
-Start PostgreSQL and Qdrant:
-
-```powershell
-docker compose up -d postgres qdrant
-```
-
-Verify:
-
-```powershell
-docker compose ps
-```
-
----
-
-# Run the API
-
-```powershell
-uvicorn app.main:app --reload
-```
-
-Open:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
----
-
-# Health check
-
-```powershell
-curl http://127.0.0.1:8000/health
-```
-
-Expected structure:
-
-```json
-{
-  "status": "ok",
-  "service": "rag-agent",
-  "dependencies": {
-    "postgres": true,
-    "qdrant": true
-  }
-}
-```
-
----
-
-# Query the agent
-
-Example:
-
-```powershell
-curl -X POST "http://127.0.0.1:8000/query" `
-  -H "Content-Type: application/json" `
-  -d '{"question":"How does the LangChain Orchestrator process incoming requests?"}'
-```
-
-The response contains an answer and structured citation metadata:
+Example response shape:
 
 ```json
 {
@@ -616,37 +99,163 @@ The response contains an answer and structured citation metadata:
 }
 ```
 
----
+## Retrieval
 
-# Run with Docker
+The production retrieval configuration uses:
 
-Build the application image:
+- Qdrant
+- cosine similarity
+- 1000-token chunks
+- 150-token overlap
+- Top-5 retrieval by default
+- document/page/chunk metadata for citations
+
+Retrieval alternatives were evaluated rather than assumed to be improvements. Chunking changes, reranking, multi-query retrieval, query rewriting, and candidate-depth diagnostics were tested. The baseline was retained because alternatives did not provide a sufficiently strong overall improvement.
+
+## Citation and grounding
+
+The generation layer is designed to answer from retrieved context and produce page-based citations.
+
+Citation validation checks that citations are present and correspond to retrieved evidence. The evaluation also measures citation correctness and groundedness separately from answer correctness.
+
+If the system cannot produce a safely supported answer, it can abstain instead of fabricating an answer.
+
+## Evaluation
+
+The benchmark contains **10 questions** and evaluates retrieval, generation, and answer quality.
+
+### Final retrieval results
+
+| Metric | Result |
+|---|---:|
+| Hit Rate@5 | **100.00%** |
+| Recall@5 | **91.67%** |
+| Precision@5 | **48.00%** |
+| MRR@5 | **88.33%** |
+
+### Final generation results
+
+| Metric | Result |
+|---|---:|
+| Answer Rate | **100.00%** |
+| Citation Rate | **100.00%** |
+| Relevant Citation Rate | **100.00%** |
+| Abstention Rate | **0.00%** |
+| Valid Citation Rate | **100.00%** |
+| Unsupported Citation Rate | **0.00%** |
+
+### Final answer-quality results
+
+| Metric | Result |
+|---|---:|
+| Correctness | **90.00%** |
+| Groundedness | **100.00%** |
+| Citation Correctness | **100.00%** |
+
+The remaining correctness issues were primarily answer precision and scope: one answer was partially incomplete and another included an additional grounded service outside the benchmark reference answer.
+
+## Observability
+
+LangSmith provides visibility into LangGraph execution and generation behavior. Application-level logging is configured for local and containerized runs.
+
+A typical traced workflow contains:
+
+```text
+LangGraph
+ ├── Retrieve
+ ├── Relevance Check
+ ├── Rewrite
+ ├── Generate
+ └── Validate
+```
+
+## Testing
+
+Tests cover the major application layers:
+
+```text
+tests/
+├── agent/
+├── api/
+├── config/
+├── evaluation/
+├── generation/
+├── ingestion/
+├── llm/
+└── retrieval/
+```
+
+Coverage includes API behavior, configuration validation, agent routing, retrieval, generation, citation handling, evaluation metrics, answer quality, benchmark behavior, and LLM integration.
+
+Targeted tests are used during development; the broader suite is run at checkpoints.
+
+## Docker
+
+The containerized stack contains:
+
+```text
+Docker Compose
+├── rag-agent-app       FastAPI + LangGraph
+├── rag-agent-postgres PostgreSQL 16
+└── rag-agent-qdrant   Qdrant
+```
+
+Ollama runs on the host and is reached from the application container through `host.docker.internal:11434`.
+
+## Local setup
+
+### Prerequisites
+
+- Python 3.13
+- Docker Desktop
+- Ollama
+- Git
+
+Pull the configured model:
+
+```powershell
+ollama pull gemma3
+```
+
+### Clone and install
+
+```powershell
+git clone https://github.com/Aad-hil/rag-agent.git
+cd rag-agent
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Copy `.env.example` to `.env` and configure PostgreSQL, Qdrant, Ollama, and optionally LangSmith. Never commit `.env`.
+
+### Run locally
+
+Start PostgreSQL and Qdrant:
+
+```powershell
+docker compose up -d postgres qdrant
+```
+
+Run the API:
+
+```powershell
+uvicorn app.main:app --reload
+```
+
+Open the interactive API documentation at `http://127.0.0.1:8000/docs`.
+
+### Run with Docker
 
 ```powershell
 docker build -t rag-agent:latest .
-```
-
-Start the stack:
-
-```powershell
 docker compose up -d
-```
-
-Check:
-
-```powershell
 docker compose ps
 ```
 
-Then open:
+Then open `http://127.0.0.1:8000/docs`.
 
-```text
-http://127.0.0.1:8000/docs
-```
-
----
-
-# Run evaluation
+## Evaluation commands
 
 Full benchmark:
 
@@ -654,83 +263,36 @@ Full benchmark:
 python -m app.evaluation.run_benchmark
 ```
 
-The benchmark evaluates the complete 10-question dataset.
-
-For faster development iterations, targeted evaluation is available:
+Faster targeted benchmark:
 
 ```powershell
 python -m app.evaluation.run_targeted_benchmark
 ```
 
----
-
-# Project structure
+## Project structure
 
 ```text
 rag-agent/
-│
 ├── app/
-│   │
 │   ├── agent/
-│   │   ├── graph.py
-│   │   ├── relevance.py
-│   │   ├── retry.py
-│   │   ├── rewrite.py
-│   │   ├── state.py
-│   │   └── validation.py
-│   │
 │   ├── evaluation/
-│   │   ├── answer_quality.py
-│   │   ├── benchmark.py
-│   │   ├── chunking_experiment.py
-│   │   ├── dataset.py
-│   │   ├── evaluator.py
-│   │   ├── generation.py
-│   │   ├── judge.py
-│   │   ├── metrics.py
-│   │   ├── multi_query_experiment.py
-│   │   ├── reranker_benchmark.py
-│   │   ├── reranker_experiment.py
-│   │   ├── retrieval.py
-│   │   ├── retrieval_diagnostics.py
-│   │   ├── rewrite_experiment.py
-│   │   ├── run_benchmark.py
-│   │   └── run_targeted_benchmark.py
-│   │
 │   ├── generation/
-│   │   ├── answer.py
-│   │   └── context.py
-│   │
 │   ├── ingestion/
-│   │   ├── chunker.py
-│   │   ├── cleaner.py
-│   │   └── ...
-│   │
 │   ├── llm/
-│   │   └── client.py
-│   │
 │   ├── retrieval/
-│   │   └── ...
-│   │
 │   ├── config.py
 │   ├── database.py
 │   ├── logging_config.py
 │   ├── main.py
 │   └── vector_store.py
-│
+├── data/
+│   └── generative-ai-application-builder-on-aws.pdf
 ├── docs/
-│   └── architecture.md
-│
+│   ├── README.md
+│   ├── architecture.md
+│   ├── architecture.svg
+│   └── retrieval-optimization.md
 ├── tests/
-│   ├── agent/
-│   ├── api/
-│   ├── config/
-│   ├── evaluation/
-│   ├── generation/
-│   ├── ingestion/
-│   ├── llm/
-│   └── retrieval/
-│
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -739,123 +301,70 @@ rag-agent/
 └── README.md
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for the detailed architecture.
+## Engineering decisions
 
----
+### LangGraph
 
-# Engineering decisions
+Makes agent state, retries, routing, validation, and failure paths explicit and testable.
 
-## LangGraph
+### Qdrant
 
-LangGraph was chosen to explicitly model the agent as a stateful workflow instead of hiding orchestration inside a single function.
+Provides semantic vector search while preserving document metadata needed for citations.
 
-This makes:
+### Ollama + Gemma 3
 
-- retries explicit
-- state transitions observable
-- validation steps testable
-- failure paths easier to reason about
+Keeps normal development and experimentation local without requiring a paid hosted LLM API.
 
-## Qdrant
+### LangSmith
 
-Qdrant provides vector similarity search and metadata associated with retrieved document chunks.
+Provides execution tracing and visibility into agent behavior.
 
-The system preserves document/page/chunk metadata so retrieved evidence can be surfaced as citations.
+### Docker
 
-## Ollama + Gemma 3
+Provides a repeatable application environment and separates the application, PostgreSQL, and Qdrant services.
 
-The local Ollama setup keeps inference inexpensive during development and experimentation. It also makes the project reproducible without requiring a paid hosted LLM API for normal development.
+## Current limitations
 
-## LangSmith
-
-LangSmith provides visibility into LangGraph execution and generation behavior.
-
-## Docker
-
-Docker provides a repeatable application environment and separates the application, PostgreSQL, and Qdrant services.
-
----
-
-# Current limitations
-
-This is intentionally a portfolio/engineering project rather than a claim of internet-scale production deployment.
-
-Current limitations include:
+This is a portfolio/engineering project, not a claim of internet-scale production deployment.
 
 - Local Ollama inference introduces significant generation latency.
-- PostgreSQL is currently used as an application dependency and health-checked, but is not yet the primary conversation-memory store.
+- PostgreSQL is currently an application dependency and health-checked, not the primary conversation-memory store.
 - Retrieval precision can still be improved.
-- The current retry strategy is intentionally limited.
+- The retry strategy is intentionally limited.
 - Answer-quality evaluation uses an LLM judge in addition to deterministic checks.
-- The benchmark dataset is currently limited to 10 questions.
-- Retrieval optimization experiments have been explored separately but are not part of the frozen production path.
+- The benchmark currently contains 10 questions.
 
----
+## Future improvements
 
-# Future improvements
+Potential future work includes:
 
-Potential next steps include:
+1. Improved reranking if future evaluation shows a clear overall benefit
+2. Better query rewriting
+3. Larger evaluation datasets
+4. More robust semantic citation verification
+5. Conversation memory
+6. Streaming responses
+7. Authentication and rate limiting
+8. CI/CD
+9. Production cloud deployment
 
-1. Retrieval optimization
-2. Improved reranking
-3. Better query rewriting
-4. Larger evaluation datasets
-5. More robust semantic citation verification
-6. Conversation memory
-7. Streaming responses
-8. Authentication and rate limiting
-9. CI/CD
-10. Production cloud deployment
+## Development philosophy
 
-These are intentionally separated from the current validated baseline.
-
----
-
-# Development philosophy
-
-The project was built incrementally. Each major layer was implemented and validated before the next layer was introduced:
+The project was built incrementally, validating each major layer before introducing the next:
 
 ```text
-Foundation
-    ↓
-RAG pipeline
-    ↓
-Agent orchestration
-    ↓
-API
-    ↓
-Evaluation
-    ↓
-Observability
-    ↓
-Testing
-    ↓
-Docker
-    ↓
-Configuration hardening
-    ↓
-Final benchmark
-    ↓
-Documentation
+Foundation → RAG pipeline → Agent orchestration → API
+→ Evaluation → Observability → Testing → Docker
+→ Configuration hardening → Final benchmark
+→ Documentation → Retrieval optimization → Portfolio polish
 ```
 
-The objective was not simply to produce a working chatbot.
-
-The objective was to build a RAG system whose behavior can be:
-
-- inspected
-- tested
-- measured
-- traced
-- reproduced
-- improved systematically
-
----
+The goal was not simply to build a chatbot, but to build a RAG system whose behavior can be **inspected, tested, measured, traced, reproduced, and improved systematically**.
 
 ## Status
 
-**Current phase: Documentation and portfolio polish**
+**Current phase: Final portfolio polish**
 
-Core application implementation, evaluation, observability, automated testing, Dockerization, production configuration hardening, and final benchmarking are complete.
+Core implementation, evaluation, observability, automated testing, Dockerization, configuration hardening, final benchmarking, documentation, and retrieval optimization are complete.
 
-The next technical focus is retrieval optimization after the documented baseline is preserved.
+The remaining work is final validation and repository presentation. After that, RAG Agent will be considered complete.
