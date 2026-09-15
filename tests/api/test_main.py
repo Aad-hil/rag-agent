@@ -6,7 +6,10 @@ from app.generation.answer import Answer, AnswerCitation
 from app.main import app
 
 
-client = TestClient(app)
+client = TestClient(
+    app,
+    raise_server_exceptions=False,
+)
 
 
 def _build_test_answer() -> Answer:
@@ -144,3 +147,27 @@ def test_query_returns_empty_citations_when_answer_has_none():
 
     assert data["answer"] == answer.text
     assert data["citations"] == []
+
+
+def test_query_returns_safe_error_when_unexpected_exception_occurs():
+    with patch(
+        "app.main.graph.invoke",
+        side_effect=RuntimeError("database connection details"),
+    ):
+        response = client.post(
+            "/query",
+            json={
+                "question": "Test unexpected failure",
+            },
+        )
+
+    assert response.status_code == 500
+
+    assert response.json() == {
+        "detail": (
+            "An internal error occurred while processing "
+            "the request."
+        )
+    }
+
+    assert "database connection details" not in response.text
