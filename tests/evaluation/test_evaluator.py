@@ -47,7 +47,11 @@ def make_question_result(
         retrieval_recall=1.0,
         retrieval_precision=0.5,
         retrieval_reciprocal_rank=1.0,
+        generated_answer=(
+            "Test answer" if generation is not None else None
+        ),
         generation=generation,
+        answer_quality=None,
         error=error,
     )
 
@@ -67,6 +71,9 @@ def make_summary(
         abstention_rate=0.1,
         valid_citation_rate=0.8,
         unsupported_citation_rate=0.0,
+        correctness_score=0.9,
+        groundedness_score=0.9,
+        citation_correctness_score=0.9,
     )
 
 
